@@ -2,7 +2,7 @@
 // Each build gets its own cache name, so a new deploy sends visitors back to the password screen.
 'use strict';
 
-const CACHE = 'pathways-demo-aad4d094b4ec';
+const CACHE = 'pathways-demo-420c4c641af0';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
