@@ -1,8 +1,8 @@
 // Serves the decrypted prototype under demo/app/ from the cache the password screen fills.
-// Each build gets its own cache name, so a new deploy sends visitors back to the password screen.
+// The same in every build: the password screen keeps only the latest build's cache.
 'use strict';
 
-const CACHE = 'pathways-demo-9cc98148a2f0';
+const PREFIX = 'pathways-demo-';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
@@ -13,10 +13,11 @@ self.addEventListener('fetch', event => {
 
   event.respondWith((async () => {
     if (url.pathname.endsWith('/')) url.pathname += 'index.html';
-    const cache = await caches.open(CACHE);
-    const hit = await cache.match(url.href, { ignoreSearch: true });
+    const name = (await caches.keys()).find(key => key.startsWith(PREFIX));
+    const hit = name && await (await caches.open(name)).match(url.href, { ignoreSearch: true });
     if (hit) return hit;
-    if (event.request.mode === 'navigate') return Response.redirect(new URL('../', self.registration.scope).href, 302);
+    // Locked or missing: back to the password screen, which won't bounce straight back here
+    if (event.request.mode === 'navigate') return Response.redirect(new URL('../#locked', self.registration.scope).href, 302);
     return new Response('Not found', { status: 404 });
   })());
 });

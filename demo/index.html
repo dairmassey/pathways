@@ -81,17 +81,24 @@ button span{position:relative}
 <script>
 (() => {
 'use strict';
-// The prototype's files are encrypted in bundle.bin. Unlocking decrypts them into a
-// Cache Storage cache that sw.js serves under app/, so the pages link to each other normally.
-const SALT = 'WXinGe88cMhXHnwwpRzTpA==', ITER = 310000, CACHE = 'pathways-demo-9cc98148a2f0', PREFIX = 'pathways-demo-';
+// The prototype's files are encrypted in bundle.bin (salt, iv, ciphertext). Unlocking decrypts them
+// into a Cache Storage cache that sw.js serves under app/, so the pages link to each other normally.
+// Nothing here changes between builds: the cache is named from the bundle's salt, so a copy of this
+// page from the browser cache still matches the latest bundle and service worker.
+const ITER = 310000, PREFIX = 'pathways-demo-';
 const TYPES = {".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".json":"application/json; charset=utf-8",".svg":"image/svg+xml",".png":"image/png",".jpg":"image/jpeg",".jpeg":"image/jpeg",".webp":"image/webp",".ico":"image/x-icon"};
 const $ = id => document.getElementById(id);
 const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-const salt = b64d(SALT);
+const hex = u => Array.from(u, b => b.toString(16).padStart(2, '0')).join('');
 const card = $('card'), form = $('form'), pw = $('pw'), go = $('go'), msg = $('msg');
 
 // start downloading the encrypted bundle right away, so unlocking is near-instant
-const bundleP = fetch('bundle.bin', {cache: 'no-cache'}).then(r => { if (!r.ok) throw new Error('bundle'); return r.arrayBuffer(); });
+const bundleP = fetch('bundle.bin', {cache: 'no-cache'}).then(async r => {
+  if (!r.ok) throw new Error('bundle');
+  const blob = new Uint8Array(await r.arrayBuffer());
+  const salt = blob.subarray(0, 16);
+  return {salt, iv: blob.subarray(16, 28), data: blob.subarray(28), cache: PREFIX + hex(salt.subarray(0, 6))};
+});
 bundleP.catch(() => {});
 
 function busy(on, text){ card.classList.toggle('busy', on); go.disabled = on; pw.disabled = on; msg.className = 'msg'; msg.textContent = text || ''; }
@@ -102,13 +109,15 @@ function fail(text){
 }
 pw.addEventListener('input', () => { $('field').classList.remove('bad'); msg.className = 'msg'; msg.textContent = ''; });
 
-async function keyFrom(pass){
+async function keyFrom(pass, salt){
   const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations: ITER, hash:'SHA-256'}, base, {name:'AES-GCM', length: 256}, false, ['decrypt']);
 }
 
+// Wait for the newest sw.js to be in charge, so an older worker never serves the app
 async function startWorker(){
   const reg = await navigator.serviceWorker.register('sw.js', {scope: './app/'});
+  try { await reg.update(); } catch (e) {}
   const sw = reg.installing || reg.waiting || reg.active;
   if (sw.state !== 'activated') await new Promise(done => sw.addEventListener('statechange', () => sw.state === 'activated' && done()));
 }
@@ -119,15 +128,15 @@ function open(fast){
 }
 
 async function unlock(pass){
-  const key = await keyFrom(pass);
-  const blob = new Uint8Array(await bundleP);
+  const bundle = await bundleP;
+  const key = await keyFrom(pass, bundle.salt);
   let plain;
-  try { plain = await crypto.subtle.decrypt({name:'AES-GCM', iv: blob.subarray(0, 12)}, key, blob.subarray(12)); }
+  try { plain = await crypto.subtle.decrypt({name:'AES-GCM', iv: bundle.iv}, key, bundle.data); }
   catch (e) { return fail('That’s not it — try again.'); }
   busy(true, 'Opening…');
   const files = await new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'))).json();
-  for (const name of await caches.keys()) if (name.startsWith(PREFIX) && name !== CACHE) await caches.delete(name);
-  const cache = await caches.open(CACHE);
+  for (const name of await caches.keys()) if (name.startsWith(PREFIX)) await caches.delete(name);
+  const cache = await caches.open(bundle.cache);
   await Promise.all(Object.entries(files).map(([path, data]) => {
     const type = TYPES[path.slice(path.lastIndexOf('.'))] || 'application/octet-stream';
     return cache.put(new URL('app/' + path, location.href), new Response(b64d(data), {headers: {'Content-Type': type}}));
@@ -144,10 +153,12 @@ form.addEventListener('submit', async e => {
   try { await unlock(pw.value); } catch (err) { fail('Something went wrong — try again.'); }
 });
 
-// already unlocked this version in this browser → skip the gate
+// already unlocked this version in this browser → skip the gate. Not when sw.js just sent us
+// back here (#locked): the files were missing, and skipping again would loop.
 (async () => {
   try {
-    if (!window.caches || !('serviceWorker' in navigator) || !await caches.has(CACHE)) return;
+    if (location.hash === '#locked') { history.replaceState(null, '', location.pathname); return; }
+    if (!window.caches || !('serviceWorker' in navigator) || !await caches.has((await bundleP).cache)) return;
     busy(true, 'Opening…');
     await startWorker();
     open(true);
